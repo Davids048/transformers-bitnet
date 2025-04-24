@@ -1,5 +1,8 @@
 from ..utils import is_accelerate_available, is_torch_available, logging
-
+import torch 
+import cupy as cp
+from os import path
+import math
 
 if is_accelerate_available():
     from accelerate import init_empty_weights
@@ -14,6 +17,86 @@ logger = logging.get_logger(__name__)
 
 # the weights are ternary so can be represented with 2 bits, and they are packed in uint8 tensors, hence the number of values per item is 4
 VALUES_PER_ITEM = 4
+
+with open(path.join(path.dirname(__file__), "pack_sub2bits.cu"), "r") as f:
+    kernel_code = f.read()
+    _pack_sub2bits = cp.RawKernel(
+        kernel_code,
+        'pack_sub2bits',
+        options = ("-I/usr/include/x86_64-linux-gnu/bits/libc-header-start.h",),
+        backend='nvcc',
+    )
+
+
+def pack_weights_sub2bits(weights: torch.Tensor) -> torch.Tensor:
+    """
+    Packs a tensor of quantized weights into a compact format using sub 2 bits
+        per value.
+
+    Parameters:
+    -----------
+    quantized_weights : torch.Tensor
+        A tensor containing ternary quantized weights with values in {-1, 0, 1}. 
+        These values are adjusted to {0, 1, 2} before being packed.
+
+
+    Returns:
+    --------
+    torch.Tensor
+        A packed tensor where each element stores 4 quantized values (each using 2 bits) in an 8-bit format.
+    """
+    # TODO: Update this doc to reflect the new implementation.
+
+    print(">>> Running pack_weights_sub2bits >>>")
+    assert weights.dtype == torch.bfloat16, "Only support bf16 weights packing!"
+    assert weights.is_cuda, "weights must be on cuda!"
+
+    if weights.dim() == 2:
+        nrows, ncols = weights.shape
+    else: 
+        # TODO: Handle how to adapt to other dims
+        raise NotImplementedError()
+
+    # one uint8 stores 5 values, i.e. 8/5 = 1.6 bits/val. 
+    # Assume all values are in the set {-1, 0, 1}
+    shifted = weights.contiguous() + 1; # Turn into {0, 1, 2} for easier manipulation.
+
+    
+    packed_ncols = int(math.ceil(ncols / 5))
+    packed = torch.zeros((nrows, packed_ncols),
+                      dtype=torch.uint8,
+                      device=weights.device)
+
+    # Dimensions:
+    # Each block handles one row. 
+    # Each block has `packed_ncols` number of threads. So each thread handles 
+    # one packing group, i.e. 5 values into 1 uint8. 
+    blocks_per_grid = (nrows,)
+    threads_per_block = (packed_ncols,)
+    shared_mem = 0 
+
+    print(">>> Launching kernel >>>")
+    print(f"weights:\n{weights}")
+    print(f"shifted:\n{shifted}")
+    print(f"blocks_per_grid: {blocks_per_grid}, "
+          f"threads_per_block: {threads_per_block}"
+        f"nrows: {nrows}, ncols: {ncols}, packed_ncols: {packed_ncols}")
+    _pack_sub2bits(
+        grid=blocks_per_grid,
+        block=threads_per_block,
+        shared_mem = shared_mem,
+        args = [
+            shifted.data_ptr(),
+            packed.data_ptr(),
+            nrows, 
+            ncols,
+            packed_ncols,
+        ]
+    )
+    print("<<< Finished kernel <<<")
+    print(f"packed weights:\n{packed}")
+    return packed
+
 
 
 def pack_weights(quantized_weights: torch.Tensor) -> torch.Tensor:

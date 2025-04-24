@@ -64,6 +64,7 @@ class BitNetTest(unittest.TestCase):
         """
         Load the model
         """
+        return
         cls.tokenizer = AutoTokenizer.from_pretrained(cls.model_name)
         cls.quantized_model = AutoModelForCausalLM.from_pretrained(cls.model_name, device_map=cls.device)
 
@@ -115,9 +116,27 @@ class BitNetTest(unittest.TestCase):
         u = torch.randint(0, 255, (256, 256), dtype=torch.uint8)
         unpacked_u = unpack_weights(u, dtype=torch.bfloat16)
         repacked_u = pack_weights(unpacked_u)
+
+        print(u)
+        print(unpacked_u, unpacked_u.max(), unpacked_u.min(), unpacked_u.shape)
+        print(repacked_u)
+
         for i in range(u.shape[0]):
             for j in range(u.shape[1]):
                 self.assertEqual(repacked_u[i][j], u[i][j])
+
+
+    def test_packing_unpacking_im(self):
+        """
+        Test the actually efficient packing/unpacking logic.
+        """
+        from transformers.integrations import (
+            pack_weights_sub2bits, 
+            unpack_weights_sub2bits
+        )
+        unpacked_u = torch.randint(-1, 2, (16,16), dtype=torch.bfloat16).cuda()
+        repacked_u = pack_weights_sub2bits(unpacked_u) 
+
 
     def test_activation_quant(self):
         """
@@ -224,3 +243,10 @@ class BitNetSerializationTest(unittest.TestCase):
             logits_loaded = model_loaded.forward(input_tensor).logits
 
         self.assertEqual((logits_loaded - logits_ref).abs().mean().item(), 0)
+
+
+if __name__ == "__main__":
+    suite = unittest.TestSuite()
+    suite.addTest(BitNetTest("test_packing_unpacking_im"))
+    unittest.TextTestRunner(verbosity=4).run(suite)
+
