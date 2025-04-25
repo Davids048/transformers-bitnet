@@ -27,6 +27,15 @@ with open(path.join(path.dirname(__file__), "pack_sub2bits.cu"), "r") as f:
         backend='nvcc',
     )
 
+with open(path.join(path.dirname(__file__), "unpack_sub2bits.cu"), "r") as f:
+    kernel_code = f.read()
+    _unpack_sub2bits = cp.RawKernel(
+        kernel_code,
+        "unpack_sub2bits",
+        options = ("-I/usr/include/x86_64-linux-gnu/bits/libc-header-start.h",),
+        backend='nvcc',
+    )
+
 
 def pack_weights_sub2bits(weights: torch.Tensor) -> torch.Tensor:
     """
@@ -59,8 +68,8 @@ def pack_weights_sub2bits(weights: torch.Tensor) -> torch.Tensor:
 
     # one uint8 stores 5 values, i.e. 8/5 = 1.6 bits/val. 
     # Assume all values are in the set {-1, 0, 1}
-    shifted = weights.contiguous() + 1; # Turn into {0, 1, 2} for easier manipulation.
-
+    # Turn into {0, 1, 2} for easier manipulation.
+    shifted = weights.contiguous() + 1 
     
     packed_ncols = int(math.ceil(ncols / 5))
     packed = torch.zeros((nrows, packed_ncols),
@@ -81,6 +90,7 @@ def pack_weights_sub2bits(weights: torch.Tensor) -> torch.Tensor:
     print(f"blocks_per_grid: {blocks_per_grid}, "
           f"threads_per_block: {threads_per_block}"
         f"nrows: {nrows}, ncols: {ncols}, packed_ncols: {packed_ncols}")
+
     _pack_sub2bits(
         grid=blocks_per_grid,
         block=threads_per_block,
@@ -96,6 +106,72 @@ def pack_weights_sub2bits(weights: torch.Tensor) -> torch.Tensor:
     print("<<< Finished kernel <<<")
     print(f"packed weights:\n{packed}")
     return packed
+
+def unpack_weights_sub2bits(packed: torch.Tensor, unpacked_shape: tuple, dtype: torch.dtype) -> torch.Tensor:
+    """
+    Unpacks a tensor of quantized weights that was stored in a packed format 
+    using 1.6 bits per value. 
+
+    Parameters:
+    -----------
+    packed: torch.Tensor 
+        A tensor containing packed weights. Each element is a uint8, representing
+        (at most) 5 quantized values. 
+    unpacked_shape: tuple
+        A tuple containing the outer shape of the unpacked weight matrix. Used 
+        because the last element in the packed weights may contain padding zeros.
+    dtype: torch.dtype 
+        The data type that the unpacked weights should be in. 
+
+    Returns:
+    --------
+    torch.Tensor 
+        The unpacked weights. 
+    """
+    print(">>> Running unpack_sub2bits >>>")
+    assert packed.dtype == torch.uint8, "Only support uint8 packed weights!"
+    assert dtype == torch.bfloat16, "(Currently) only support unpack to bfloat16!"
+    assert packed.is_cuda 
+
+    if packed.dim() == 2:
+        nrows, packed_ncols = packed.shape
+    else:
+        raise NotImplementedError()
+
+    _, ncols = unpacked_shape
+
+    # Create dst dimension 
+    # E.g.:
+    # Original 16 * 16 -> pack -> 16 * 4 (as Ceil(16/5) = 4)
+    shifted = torch.zeros(unpacked_shape, dtype=dtype, device=packed.device)
+
+    blocks_per_grid = (nrows,)
+    threads_per_block = (packed_ncols,)
+    shared_mem = 0
+
+    print(">>> Launching kernel >>>")
+
+    _unpack_sub2bits(
+        grid = blocks_per_grid,
+        block = threads_per_block,
+        shared_mem = shared_mem,
+        args = [
+            packed.data_ptr(),
+            shifted.data_ptr(),
+            nrows,
+            ncols,
+            packed_ncols,
+        ]
+    )
+    print("<<< Finished kernel <<<")
+    print(f"unpacked shifted:\n{shifted}")
+
+    unpacked_weights = shifted.contiguous() - 1
+    print(f"unpacked weights:\n{unpacked_weights}")
+
+    assert unpacked_weights.dtype == dtype
+    return unpacked_weights
+
 
 
 
@@ -208,6 +284,7 @@ def unpack_weights(packed: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
 
 class BitLinear(nn.Module):
     def __init__(self, in_features: int, out_features: int, bias: bool, device=None, dtype=None):
+        print("Creating bitlear layers.")
         super().__init__()
         self.dtype = dtype
         self.in_features = in_features
@@ -263,6 +340,7 @@ class BitLinear(nn.Module):
         return out
 
     def forward(self, input):
+        print("In BitLinear.forward")
         w = self.weight
         w_quant = unpack_weights(w, dtype=self.dtype)
         input_quant, input_scale = self.activation_quant(input)
@@ -330,6 +408,7 @@ class AutoBitLinear(nn.Linear):
         online_quant: bool = False,
     ):
         super(AutoBitLinear, self).__init__(in_features, out_features, bias)
+        print(f"Creating AutoBitLinear layers, self.weight.dtype: {self.weight.dtype}")
         self.online_quant = online_quant
         if not online_quant:
             self.register_buffer(
@@ -349,11 +428,23 @@ class AutoBitLinear(nn.Linear):
         *args,
         **kwargs,
     ):
+        print(f"In AutoBitLinear.load_hook, prefix: {prefix}")
         if (prefix + "weight") in state_dict and state_dict[prefix + "weight"].dtype != self.weight.dtype:
+
+            print(f"\tUppacked weights due to diff- dtype."
+                  f" Weight {prefix}"
+                  f" self.weight.dtype {self.weight.dtype}"
+                  f" state_dict.dtype {state_dict[prefix+'weight'].dtype}"
+            )
+
             state_dict[prefix + "weight"] = unpack_weights(state_dict[prefix + "weight"], dtype=self.weight.dtype)
+
+        else:
+            print("\tNo need for unpacking")
         return state_dict
 
     def forward(self, input):
+        print("In AutoBitLinear.forward")
         if self.online_quant:
             weight = WeightQuant.apply(self.weight)
         else:
@@ -378,7 +469,7 @@ def _replace_with_bitnet_linear(
 
     Returns the converted model and a boolean that indicates if the conversion has been successfull or not.
     """
-
+    print("In _replace_with_bitnet_linear")
     if current_key_name is None:
         current_key_name = []
 
@@ -394,6 +485,8 @@ def _replace_with_bitnet_linear(
                     in_features = module.in_features
                     out_features = module.out_features
                     if quantization_config and quantization_config.linear_class == "autobitlinear":
+                        print(f"name: {name}")
+                        print(f"module weight dtype: {module.weight.dtype}")
                         model._modules[name] = AutoBitLinear(
                             in_features=in_features,
                             out_features=out_features,
@@ -453,6 +546,7 @@ def replace_with_bitnet_linear(
             it) is not in the list of modules to not convert (for instances modules that are offloaded to `cpu` or
             `disk`).
     """
+    print("Replacing bitnet linear layers")
     modules_to_not_convert = ["lm_head"] if modules_to_not_convert is None else modules_to_not_convert
     if quantization_config and quantization_config.modules_to_not_convert is not None:
         modules_to_not_convert.extend(quantization_config.modules_to_not_convert)
