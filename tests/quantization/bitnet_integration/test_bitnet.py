@@ -134,8 +134,20 @@ class BitNetTest(unittest.TestCase):
             pack_weights_sub2bits, 
             unpack_weights_sub2bits
         )
-        unpacked_u = torch.randint(-1, 2, (16,16), dtype=torch.bfloat16).cuda()
-        repacked_u = pack_weights_sub2bits(unpacked_u) 
+
+        weight_shape = (64,64)
+        u = torch.randint(-1, 2, weight_shape, dtype=torch.bfloat16).cuda()
+        packed_u = pack_weights_sub2bits(u) 
+        unpacked_u = unpack_weights_sub2bits(
+            packed_u,
+            weight_shape,
+            dtype=torch.bfloat16
+        )
+
+        for i in range(u.shape[0]):
+            for j in range(u.shape[1]):
+                self.assertEqual(unpacked_u[i][j], u[i][j])
+        
 
 
     def test_activation_quant(self):

@@ -48,14 +48,12 @@ def pack_weights_sub2bits(weights: torch.Tensor) -> torch.Tensor:
         A tensor containing ternary quantized weights with values in {-1, 0, 1}. 
         These values are adjusted to {0, 1, 2} before being packed.
 
-
     Returns:
     --------
     torch.Tensor
-        A packed tensor where each element stores 4 quantized values (each using 2 bits) in an 8-bit format.
+        A packed tensor where each element stores 5 quantized values 
+        (each using 1.6 bits) in an 8-bit format.
     """
-    # TODO: Update this doc to reflect the new implementation.
-
     print(">>> Running pack_weights_sub2bits >>>")
     assert weights.dtype == torch.bfloat16, "Only support bf16 weights packing!"
     assert weights.is_cuda, "weights must be on cuda!"
@@ -66,7 +64,6 @@ def pack_weights_sub2bits(weights: torch.Tensor) -> torch.Tensor:
         # TODO: Handle how to adapt to other dims
         raise NotImplementedError()
 
-    # one uint8 stores 5 values, i.e. 8/5 = 1.6 bits/val. 
     # Assume all values are in the set {-1, 0, 1}
     # Turn into {0, 1, 2} for easier manipulation.
     shifted = weights.contiguous() + 1 
@@ -87,9 +84,6 @@ def pack_weights_sub2bits(weights: torch.Tensor) -> torch.Tensor:
     print(">>> Launching kernel >>>")
     print(f"weights:\n{weights}")
     print(f"shifted:\n{shifted}")
-    print(f"blocks_per_grid: {blocks_per_grid}, "
-          f"threads_per_block: {threads_per_block}"
-        f"nrows: {nrows}, ncols: {ncols}, packed_ncols: {packed_ncols}")
 
     _pack_sub2bits(
         grid=blocks_per_grid,
@@ -104,7 +98,7 @@ def pack_weights_sub2bits(weights: torch.Tensor) -> torch.Tensor:
         ]
     )
     print("<<< Finished kernel <<<")
-    print(f"packed weights:\n{packed}")
+    print(f"packed weights (shifted):\n{packed}")
     return packed
 
 def unpack_weights_sub2bits(packed: torch.Tensor, unpacked_shape: tuple, dtype: torch.dtype) -> torch.Tensor:
@@ -140,9 +134,6 @@ def unpack_weights_sub2bits(packed: torch.Tensor, unpacked_shape: tuple, dtype: 
 
     _, ncols = unpacked_shape
 
-    # Create dst dimension 
-    # E.g.:
-    # Original 16 * 16 -> pack -> 16 * 4 (as Ceil(16/5) = 4)
     shifted = torch.zeros(unpacked_shape, dtype=dtype, device=packed.device)
 
     blocks_per_grid = (nrows,)

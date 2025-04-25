@@ -38,15 +38,6 @@ __global__ void pack_sub2bits(
 					src[row_id * ncols + i * 5 + j]
 				);
 			}
-			if (tid == 0 && (row_id == 0)) {
-				printf("tid: %d, row_id: %d, pow:%u, read: %d, added: %u\n", 
-		   			tid,
-		   			row_id,
-		   			pow[j],
-		   			__bfloat162uint_rn(src[row_id * ncols + i * 5 + j]),
-		   			pow[j] * __bfloat162uint_rn(src[row_id * ncols + i * 5 + j])
-		   		);
-			}
 		}
 		
 		// Since the max of 5 digit ternary is 242, we don't need to remap 
