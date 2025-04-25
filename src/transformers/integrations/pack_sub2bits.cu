@@ -24,8 +24,7 @@ __global__ void pack_sub2bits(
 	int tid 	= threadIdx.x;
 	int block_size = blockDim.x; // n_threads in the block
 
-	if (row_id >= nrows) return;
-
+	const unsigned int pow[5] = {1, 3, 9, 27, 81};
 
 	# pragma unroll
 	for(int i = tid; i < packed_ncols; i+=block_size) {
@@ -35,15 +34,17 @@ __global__ void pack_sub2bits(
 			if (i * 5 + j >= ncols) {
 				break;
 			} else {
-				packed_sum += __bfloat162uint_rn(
+				packed_sum += pow[j] * __bfloat162uint_rn(
 					src[row_id * ncols + i * 5 + j]
 				);
 			}
-			if (tid == 0 && (row_id == 0 || row_id == 1)) {
-				printf("tid: %d, row_id: %d, added: %u\n", 
+			if (tid == 0 && (row_id == 0)) {
+				printf("tid: %d, row_id: %d, pow:%u, read: %d, added: %u\n", 
 		   			tid,
 		   			row_id,
-		   			__bfloat162uint_rn(src[row_id * ncols + i * 5 + j])
+		   			pow[j],
+		   			__bfloat162uint_rn(src[row_id * ncols + i * 5 + j]),
+		   			pow[j] * __bfloat162uint_rn(src[row_id * ncols + i * 5 + j])
 		   		);
 			}
 		}
